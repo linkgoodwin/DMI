@@ -61,14 +61,14 @@ const int ADX_INTERVALS = 10;
 const double ADX_INTERVAL_SIZE = 10.0;
 
 //--- Position tracking
-enum POSITION_TYPE
+enum EA_POSITION_TYPE
 {
-    POSITION_NONE,
-    POSITION_LONG,
-    POSITION_SHORT
+    EA_POSITION_NONE,
+    EA_POSITION_LONG,
+    EA_POSITION_SHORT
 };
 
-POSITION_TYPE current_position_type = POSITION_NONE;
+EA_POSITION_TYPE current_position_type = EA_POSITION_NONE;
 double current_position_volume = 0.0;
 
 //+------------------------------------------------------------------+
@@ -268,7 +268,7 @@ void CheckCrossoverSignals()
     if(InpAllowBuy && plus_di[1] > minus_di[1] && plus_di[2] <= minus_di[2])
     {
         // Close any existing short position first
-        if(current_position_type == POSITION_SHORT)
+        if(current_position_type == EA_POSITION_SHORT)
         {
             ClosePosition("平空");
         }
@@ -281,7 +281,7 @@ void CheckCrossoverSignals()
             entry_adx_interval = GetADXInterval(adx[1]);
             entry_lot_size = lot_size;
             entry_time = TimeCurrent();
-            current_position_type = POSITION_LONG;
+            current_position_type = EA_POSITION_LONG;
             current_position_volume = lot_size;
             
             if(InpShowLabels)
@@ -292,7 +292,7 @@ void CheckCrossoverSignals()
     else if(InpAllowSell && minus_di[1] > plus_di[1] && minus_di[2] <= plus_di[2])
     {
         // Close any existing long position first
-        if(current_position_type == POSITION_LONG)
+        if(current_position_type == EA_POSITION_LONG)
         {
             ClosePosition("平多");
         }
@@ -305,7 +305,7 @@ void CheckCrossoverSignals()
             entry_adx_interval = GetADXInterval(adx[1]);
             entry_lot_size = lot_size;
             entry_time = TimeCurrent();
-            current_position_type = POSITION_SHORT;
+            current_position_type = EA_POSITION_SHORT;
             current_position_volume = lot_size;
             
             if(InpShowLabels)
@@ -319,7 +319,7 @@ void CheckCrossoverSignals()
 //+------------------------------------------------------------------+
 void ManagePositions()
 {
-    if(current_position_type == POSITION_NONE)
+    if(current_position_type == EA_POSITION_NONE)
         return;
     
     int current_adx_interval = GetADXInterval(adx[1]);
@@ -343,7 +343,7 @@ void ManagePositions()
     // Check for full position close (ADX falls N intervals below entry)
     if(current_adx_interval <= (entry_adx_interval - InpStopLossIntervals))
     {
-        string close_label = (current_position_type == POSITION_LONG) ? "平多" : "平空";
+        string close_label = (current_position_type == EA_POSITION_LONG) ? "平多" : "平空";
         ClosePosition(close_label);
         
         // Count as stop loss
@@ -387,15 +387,15 @@ bool OpenPosition(ENUM_ORDER_TYPE order_type, double volume)
 //+------------------------------------------------------------------+
 void ClosePosition(string label)
 {
-    if(current_position_type == POSITION_NONE)
+    if(current_position_type == EA_POSITION_NONE)
         return;
     
     bool result = false;
-    if(current_position_type == POSITION_LONG)
+    if(current_position_type == EA_POSITION_LONG)
     {
         result = trade.Sell(current_position_volume, Symbol());
     }
-    else if(current_position_type == POSITION_SHORT)
+    else if(current_position_type == EA_POSITION_SHORT)
     {
         result = trade.Buy(current_position_volume, Symbol());
     }
@@ -408,7 +408,7 @@ void ClosePosition(string label)
             CreateTradeLabel(label, clrYellow);
         
         // Reset position tracking
-        current_position_type = POSITION_NONE;
+        current_position_type = EA_POSITION_NONE;
         current_position_volume = 0.0;
         entry_adx_value = 0;
         entry_adx_interval = 0;
@@ -430,11 +430,11 @@ void ReducePosition(double reduction_volume)
         return;
     
     bool result = false;
-    if(current_position_type == POSITION_LONG)
+    if(current_position_type == EA_POSITION_LONG)
     {
         result = trade.Sell(reduction_volume, Symbol());
     }
-    else if(current_position_type == POSITION_SHORT)
+    else if(current_position_type == EA_POSITION_SHORT)
     {
         result = trade.Buy(reduction_volume, Symbol());
     }
@@ -498,18 +498,18 @@ void UpdatePositionInfo()
         
         if(pos_type == POSITION_TYPE_BUY)
         {
-            current_position_type = POSITION_LONG;
+            current_position_type = EA_POSITION_LONG;
             current_position_volume = pos_volume;
         }
         else if(pos_type == POSITION_TYPE_SELL)
         {
-            current_position_type = POSITION_SHORT;
+            current_position_type = EA_POSITION_SHORT;
             current_position_volume = pos_volume;
         }
     }
     else
     {
-        current_position_type = POSITION_NONE;
+        current_position_type = EA_POSITION_NONE;
         current_position_volume = 0.0;
     }
 }
@@ -562,7 +562,8 @@ void CreateTradeLabel(string text, color label_color)
 {
     string label_name = "TradeLabel_" + IntegerToString(TimeCurrent());
     
-    if(ObjectCreate(chart_id, label_name, OBJ_TEXT, 0, TimeCurrent(), Close[0]))
+    double current_close = iClose(Symbol(), InpTimeframe, 0);
+    if(ObjectCreate(chart_id, label_name, OBJ_TEXT, 0, TimeCurrent(), current_close))
     {
         ObjectSetString(chart_id, label_name, OBJPROP_TEXT, text);
         ObjectSetInteger(chart_id, label_name, OBJPROP_COLOR, label_color);
@@ -615,9 +616,9 @@ void UpdateInfoPanel()
     
     // Position Info
     info_text += "=== Position Info ===\n";
-    if(current_position_type != POSITION_NONE)
+    if(current_position_type != EA_POSITION_NONE)
     {
-        string pos_type = (current_position_type == POSITION_LONG) ? "Long" : "Short";
+        string pos_type = (current_position_type == EA_POSITION_LONG) ? "Long" : "Short";
         info_text += "Position: " + pos_type + "\n";
         info_text += "Volume: " + DoubleToString(current_position_volume, 2) + "\n";
         info_text += "Entry ADX: " + DoubleToString(entry_adx_value, 2) + "\n";
