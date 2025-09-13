@@ -57,6 +57,8 @@ bool is_trading_paused;
 long chart_id;
 int total_trade_count;
 int daily_trade_count;
+int last_adx_interval;
+double total_reduced_volume;
 
 //--- ADX interval constants
 const int ADX_INTERVALS = 10;
@@ -111,6 +113,8 @@ int OnInit()
     chart_id = ChartID();
     total_trade_count = 0;
     daily_trade_count = 0;
+    last_adx_interval = -1;
+    total_reduced_volume = 0.0;
     
     // Set up chart display
     if(InpShowPanel)
@@ -289,6 +293,8 @@ void CheckCrossoverSignals()
             entry_time = TimeCurrent();
             current_position_type = EA_POSITION_LONG;
             current_position_volume = lot_size;
+            last_adx_interval = entry_adx_interval;
+            total_reduced_volume = 0.0;
             
             if(InpShowLabels)
                 CreateTradeLabel("开多", clrLime);
@@ -317,6 +323,8 @@ void CheckCrossoverSignals()
             entry_time = TimeCurrent();
             current_position_type = EA_POSITION_SHORT;
             current_position_volume = lot_size;
+            last_adx_interval = entry_adx_interval;
+            total_reduced_volume = 0.0;
             
             if(InpShowLabels)
                 CreateTradeLabel("开空", clrRed);
@@ -336,33 +344,7 @@ void ManagePositions()
     
     int current_adx_interval = GetADXInterval(adx[1]);
     
-    // Check for position reduction (ADX rises above entry interval)
-    // Reduce by 0.01 lots for each interval ADX rises above entry interval
-    if(current_adx_interval > entry_adx_interval)
-    {
-        int intervals_risen = current_adx_interval - entry_adx_interval;
-        double total_reduction_needed = 0.01 * intervals_risen * InpLotMultiplier;
-        
-        // Calculate how much we've already reduced (if any)
-        double already_reduced = entry_lot_size - current_position_volume;
-        double additional_reduction = total_reduction_needed - already_reduced;
-        
-        if(additional_reduction > 0)
-        {
-            // Normalize reduction volume
-            double lot_step = SymbolInfoDouble(Symbol(), SYMBOL_VOLUME_STEP);
-            additional_reduction = NormalizeDouble(additional_reduction / lot_step, 0) * lot_step;
-            
-            if(additional_reduction > 0 && additional_reduction < current_position_volume)
-            {
-                ReducePosition(additional_reduction);
-                Print("Position reduced: ADX rose to interval ", current_adx_interval, 
-                      " (from entry interval ", entry_adx_interval, "). Reduced by: ", additional_reduction);
-            }
-        }
-    }
-    
-    // Check for full position close (ADX falls N intervals or more below entry)
+    // Check for full position close FIRST (ADX falls N intervals or more below entry)
     // Stop-loss triggered when ADX falls N intervals below entry interval
     if(current_adx_interval <= (entry_adx_interval - InpStopLossIntervals))
     {
@@ -374,7 +356,44 @@ void ManagePositions()
         
         Print("Stop-loss triggered: ADX fell to interval ", current_adx_interval, 
               " (", InpStopLossIntervals, " intervals below entry interval ", entry_adx_interval, ")");
+        return; // Exit after closing position
     }
+    
+    // Check for position reduction (ADX rises above entry interval)
+    // This should happen on EACH BAR when ADX is in higher intervals
+    if(current_adx_interval > entry_adx_interval)
+    {
+        // Calculate total reduction needed based on current ADX interval
+        int intervals_above_entry = current_adx_interval - entry_adx_interval;
+        double total_reduction_needed = 0.01 * intervals_above_entry * InpLotMultiplier;
+        
+        // Check if we need additional reduction
+        if(total_reduction_needed > total_reduced_volume)
+        {
+            double additional_reduction = total_reduction_needed - total_reduced_volume;
+            
+            // Normalize reduction volume
+            double lot_step = SymbolInfoDouble(Symbol(), SYMBOL_VOLUME_STEP);
+            additional_reduction = NormalizeDouble(additional_reduction / lot_step, 0) * lot_step;
+            
+            // Ensure we don't reduce more than current position
+            additional_reduction = MathMin(additional_reduction, current_position_volume);
+            
+            if(additional_reduction > 0)
+            {
+                if(ReducePosition(additional_reduction))
+                {
+                    total_reduced_volume += additional_reduction;
+                    Print("Position reduced: ADX at interval ", current_adx_interval, 
+                          " (", intervals_above_entry, " intervals above entry ", entry_adx_interval, 
+                          "). Reduced by: ", additional_reduction, " Total reduced: ", total_reduced_volume);
+                }
+            }
+        }
+    }
+    
+    // Update last ADX interval for tracking
+    last_adx_interval = current_adx_interval;
 }
 
 //+------------------------------------------------------------------+
@@ -444,6 +463,8 @@ void ClosePosition(string label)
         entry_adx_interval = 0;
         entry_lot_size = 0;
         entry_time = 0;
+        last_adx_interval = -1;
+        total_reduced_volume = 0.0;
     }
     else
     {
@@ -454,10 +475,10 @@ void ClosePosition(string label)
 //+------------------------------------------------------------------+
 //| Reduce position size                                            |
 //+------------------------------------------------------------------+
-void ReducePosition(double reduction_volume)
+bool ReducePosition(double reduction_volume)
 {
     if(current_position_volume <= reduction_volume)
-        return;
+        return false;
     
     bool result = false;
     if(current_position_type == EA_POSITION_LONG)
@@ -476,10 +497,13 @@ void ReducePosition(double reduction_volume)
         
         if(InpShowLabels)
             CreateTradeLabel("减仓", clrOrange);
+        
+        return true;
     }
     else
     {
         Print("Failed to reduce position: ", trade.ResultRetcode(), " - ", trade.ResultRetcodeDescription());
+        return false;
     }
 }
 
@@ -658,7 +682,9 @@ void UpdateInfoPanel()
     info_text += "+DI: " + DoubleToString(plus_di[1], 2) + "\n";
     info_text += "-DI: " + DoubleToString(minus_di[1], 2) + "\n";
     info_text += "ADX: " + DoubleToString(adx[1], 2) + "\n";
-    info_text += "ADX Interval: " + IntegerToString(GetADXInterval(adx[1])) + "\n";
+    int current_interval = GetADXInterval(adx[1]);
+    info_text += "ADX Interval: " + IntegerToString(current_interval) + "\n";
+    info_text += "Lot for ADX: " + DoubleToString(CalculateLotSize(adx[1]), 2) + "\n";
     info_text += "\n";
     
     // Position Info
@@ -668,7 +694,9 @@ void UpdateInfoPanel()
         string pos_type = (current_position_type == EA_POSITION_LONG) ? "Long" : "Short";
         info_text += "Position: " + pos_type + "\n";
         info_text += "Volume: " + DoubleToString(current_position_volume, 2) + "\n";
-        info_text += "Entry ADX: " + DoubleToString(entry_adx_value, 2) + "\n";
+        info_text += "Entry ADX: " + DoubleToString(entry_adx_value, 2) + " (Interval: " + IntegerToString(entry_adx_interval) + ")\n";
+        info_text += "Entry Lot: " + DoubleToString(entry_lot_size, 2) + "\n";
+        info_text += "Reduced: " + DoubleToString(total_reduced_volume, 2) + "\n";
         info_text += "Entry Time: " + TimeToString(entry_time, TIME_MINUTES) + "\n";
         
         if(PositionSelect(Symbol()))
