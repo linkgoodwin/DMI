@@ -55,6 +55,8 @@ datetime last_stop_loss_date;
 datetime trading_pause_until;
 bool is_trading_paused;
 long chart_id;
+int total_trade_count;
+int daily_trade_count;
 
 //--- ADX interval constants
 const int ADX_INTERVALS = 10;
@@ -107,6 +109,8 @@ int OnInit()
     trading_pause_until = 0;
     is_trading_paused = false;
     chart_id = ChartID();
+    total_trade_count = 0;
+    daily_trade_count = 0;
     
     // Set up chart display
     if(InpShowPanel)
@@ -231,9 +235,9 @@ double CalculateLotSize(double adx_value)
 {
     int interval = GetADXInterval(adx_value);
     
-    // Lot sizes from highest interval (0.01) to lowest interval (0.10)
+    // Lot sizes: highest ADX interval (90-100) = 0.01 lots, increasing by 0.01 per lower interval
     // Interval 9 (90-100): 0.01, Interval 8 (80-90): 0.02, ..., Interval 0 (0-10): 0.10
-    double base_lot = 0.01 + (0.01 * (9 - interval));
+    double base_lot = 0.01 * (10 - interval);  // 10-9=1 -> 0.01, 10-8=2 -> 0.02, ..., 10-0=10 -> 0.10
     
     // Apply multiplier
     double lot_size = base_lot * InpLotMultiplier;
@@ -265,15 +269,17 @@ int GetADXInterval(double adx_value)
 void CheckCrossoverSignals()
 {
     // Check for +DI crossing above -DI (Buy signal)
+    // EVERY crossover must trigger entry
     if(InpAllowBuy && plus_di[1] > minus_di[1] && plus_di[2] <= minus_di[2])
     {
-        // Close any existing short position first
-        if(current_position_type == EA_POSITION_SHORT)
+        // Close any existing position first (regardless of direction)
+        if(current_position_type != EA_POSITION_NONE)
         {
-            ClosePosition("平空");
+            string close_label = (current_position_type == EA_POSITION_LONG) ? "平多" : "平空";
+            ClosePosition(close_label);
         }
         
-        // Open long position
+        // Always open new long position after crossover
         double lot_size = CalculateLotSize(adx[1]);
         if(OpenPosition(ORDER_TYPE_BUY, lot_size))
         {
@@ -286,18 +292,22 @@ void CheckCrossoverSignals()
             
             if(InpShowLabels)
                 CreateTradeLabel("开多", clrLime);
+                
+            Print("Buy signal: +DI crossed above -DI. ADX: ", adx[1], " Interval: ", entry_adx_interval, " Lot: ", lot_size);
         }
     }
-    // Check for -DI crossing above +DI (Sell signal)
+    // Check for -DI crossing above +DI (Sell signal)  
+    // EVERY crossover must trigger entry
     else if(InpAllowSell && minus_di[1] > plus_di[1] && minus_di[2] <= plus_di[2])
     {
-        // Close any existing long position first
-        if(current_position_type == EA_POSITION_LONG)
+        // Close any existing position first (regardless of direction)
+        if(current_position_type != EA_POSITION_NONE)
         {
-            ClosePosition("平多");
+            string close_label = (current_position_type == EA_POSITION_LONG) ? "平多" : "平空";
+            ClosePosition(close_label);
         }
         
-        // Open short position
+        // Always open new short position after crossover
         double lot_size = CalculateLotSize(adx[1]);
         if(OpenPosition(ORDER_TYPE_SELL, lot_size))
         {
@@ -310,6 +320,8 @@ void CheckCrossoverSignals()
             
             if(InpShowLabels)
                 CreateTradeLabel("开空", clrRed);
+                
+            Print("Sell signal: -DI crossed above +DI. ADX: ", adx[1], " Interval: ", entry_adx_interval, " Lot: ", lot_size);
         }
     }
 }
@@ -325,22 +337,33 @@ void ManagePositions()
     int current_adx_interval = GetADXInterval(adx[1]);
     
     // Check for position reduction (ADX rises above entry interval)
+    // Reduce by 0.01 lots for each interval ADX rises above entry interval
     if(current_adx_interval > entry_adx_interval)
     {
         int intervals_risen = current_adx_interval - entry_adx_interval;
-        double reduction_volume = 0.01 * intervals_risen * InpLotMultiplier;
+        double total_reduction_needed = 0.01 * intervals_risen * InpLotMultiplier;
         
-        // Normalize reduction volume
-        double lot_step = SymbolInfoDouble(Symbol(), SYMBOL_VOLUME_STEP);
-        reduction_volume = NormalizeDouble(reduction_volume / lot_step, 0) * lot_step;
+        // Calculate how much we've already reduced (if any)
+        double already_reduced = entry_lot_size - current_position_volume;
+        double additional_reduction = total_reduction_needed - already_reduced;
         
-        if(reduction_volume > 0 && reduction_volume < current_position_volume)
+        if(additional_reduction > 0)
         {
-            ReducePosition(reduction_volume);
+            // Normalize reduction volume
+            double lot_step = SymbolInfoDouble(Symbol(), SYMBOL_VOLUME_STEP);
+            additional_reduction = NormalizeDouble(additional_reduction / lot_step, 0) * lot_step;
+            
+            if(additional_reduction > 0 && additional_reduction < current_position_volume)
+            {
+                ReducePosition(additional_reduction);
+                Print("Position reduced: ADX rose to interval ", current_adx_interval, 
+                      " (from entry interval ", entry_adx_interval, "). Reduced by: ", additional_reduction);
+            }
         }
     }
     
-    // Check for full position close (ADX falls N intervals below entry)
+    // Check for full position close (ADX falls N intervals or more below entry)
+    // Stop-loss triggered when ADX falls N intervals below entry interval
     if(current_adx_interval <= (entry_adx_interval - InpStopLossIntervals))
     {
         string close_label = (current_position_type == EA_POSITION_LONG) ? "平多" : "平空";
@@ -348,6 +371,9 @@ void ManagePositions()
         
         // Count as stop loss
         CountStopLoss();
+        
+        Print("Stop-loss triggered: ADX fell to interval ", current_adx_interval, 
+              " (", InpStopLossIntervals, " intervals below entry interval ", entry_adx_interval, ")");
     }
 }
 
@@ -373,6 +399,10 @@ bool OpenPosition(ENUM_ORDER_TYPE order_type, double volume)
     if(result)
     {
         Print("Position opened: ", EnumToString(order_type), " Volume: ", volume);
+        
+        // Update trade counters
+        total_trade_count++;
+        UpdateDailyTradeCount();
     }
     else
     {
@@ -515,6 +545,23 @@ void UpdatePositionInfo()
 }
 
 //+------------------------------------------------------------------+
+//| Update daily trade count                                        |
+//+------------------------------------------------------------------+
+void UpdateDailyTradeCount()
+{
+    static datetime last_trade_date = 0;
+    datetime current_date = StringToTime(TimeToString(TimeCurrent(), TIME_DATE));
+    
+    if(last_trade_date != current_date)
+    {
+        daily_trade_count = 0;
+        last_trade_date = current_date;
+    }
+    
+    daily_trade_count++;
+}
+
+//+------------------------------------------------------------------+
 //| Count stop loss and check daily limit                          |
 //+------------------------------------------------------------------+
 void CountStopLoss()
@@ -636,9 +683,15 @@ void UpdateInfoPanel()
     }
     info_text += "\n";
     
+    // Trade Statistics
+    info_text += "=== Trade Statistics ===\n";
+    info_text += "Daily Trades: " + IntegerToString(daily_trade_count) + "\n";
+    info_text += "Total Trades: " + IntegerToString(total_trade_count) + "\n";
+    info_text += "Daily SL Count: " + IntegerToString(daily_stop_loss_count) + "/" + IntegerToString(InpDailyStopLossLimit) + "\n";
+    info_text += "\n";
+    
     // Risk Management
     info_text += "=== Risk Management ===\n";
-    info_text += "Daily SL Count: " + IntegerToString(daily_stop_loss_count) + "/" + IntegerToString(InpDailyStopLossLimit) + "\n";
     if(is_trading_paused)
     {
         info_text += "Trading Paused Until: " + TimeToString(trading_pause_until, TIME_MINUTES) + "\n";
