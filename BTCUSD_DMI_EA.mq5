@@ -276,12 +276,11 @@ void CheckCrossoverSignals()
     // EVERY crossover must trigger entry
     if(InpAllowBuy && plus_di[1] > minus_di[1] && plus_di[2] <= minus_di[2])
     {
-        // Close any existing position first (regardless of direction)
-        if(current_position_type != EA_POSITION_NONE)
-        {
-            string close_label = (current_position_type == EA_POSITION_LONG) ? "平多" : "平空";
-            ClosePosition(close_label);
-        }
+        // ALWAYS close any existing position first (check actual MT5 positions)
+        CloseAllExistingPositions("平仓");
+        
+        // Small delay to ensure position is closed before opening new one
+        Sleep(100);
         
         // Always open new long position after crossover
         double lot_size = CalculateLotSize(adx[1]);
@@ -306,12 +305,11 @@ void CheckCrossoverSignals()
     // EVERY crossover must trigger entry
     else if(InpAllowSell && minus_di[1] > plus_di[1] && minus_di[2] <= plus_di[2])
     {
-        // Close any existing position first (regardless of direction)
-        if(current_position_type != EA_POSITION_NONE)
-        {
-            string close_label = (current_position_type == EA_POSITION_LONG) ? "平多" : "平空";
-            ClosePosition(close_label);
-        }
+        // ALWAYS close any existing position first (check actual MT5 positions)
+        CloseAllExistingPositions("平仓");
+        
+        // Small delay to ensure position is closed before opening new one
+        Sleep(100);
         
         // Always open new short position after crossover
         double lot_size = CalculateLotSize(adx[1]);
@@ -432,44 +430,58 @@ bool OpenPosition(ENUM_ORDER_TYPE order_type, double volume)
 }
 
 //+------------------------------------------------------------------+
+//| Close all existing positions for this symbol                   |
+//+------------------------------------------------------------------+
+void CloseAllExistingPositions(string label)
+{
+    // Check for actual MT5 positions and close them
+    if(PositionSelect(Symbol()))
+    {
+        double pos_volume = PositionGetDouble(POSITION_VOLUME);
+        long pos_type = PositionGetInteger(POSITION_TYPE);
+        
+        bool result = false;
+        if(pos_type == POSITION_TYPE_BUY)
+        {
+            result = trade.Sell(pos_volume, Symbol());
+            Print("Closing existing LONG position: Volume ", pos_volume);
+        }
+        else if(pos_type == POSITION_TYPE_SELL)
+        {
+            result = trade.Buy(pos_volume, Symbol());
+            Print("Closing existing SHORT position: Volume ", pos_volume);
+        }
+        
+        if(result)
+        {
+            Print("Position closed successfully: ", label);
+            if(InpShowLabels)
+                CreateTradeLabel(label, clrYellow);
+        }
+        else
+        {
+            Print("Failed to close existing position: ", trade.ResultRetcode(), " - ", trade.ResultRetcodeDescription());
+        }
+    }
+    
+    // Reset internal tracking regardless
+    current_position_type = EA_POSITION_NONE;
+    current_position_volume = 0.0;
+    entry_adx_value = 0;
+    entry_adx_interval = 0;
+    entry_lot_size = 0;
+    entry_time = 0;
+    last_adx_interval = -1;
+    total_reduced_volume = 0.0;
+}
+
+//+------------------------------------------------------------------+
 //| Close current position                                          |
 //+------------------------------------------------------------------+
 void ClosePosition(string label)
 {
-    if(current_position_type == EA_POSITION_NONE)
-        return;
-    
-    bool result = false;
-    if(current_position_type == EA_POSITION_LONG)
-    {
-        result = trade.Sell(current_position_volume, Symbol());
-    }
-    else if(current_position_type == EA_POSITION_SHORT)
-    {
-        result = trade.Buy(current_position_volume, Symbol());
-    }
-    
-    if(result)
-    {
-        Print("Position closed: ", label, " Volume: ", current_position_volume);
-        
-        if(InpShowLabels)
-            CreateTradeLabel(label, clrYellow);
-        
-        // Reset position tracking
-        current_position_type = EA_POSITION_NONE;
-        current_position_volume = 0.0;
-        entry_adx_value = 0;
-        entry_adx_interval = 0;
-        entry_lot_size = 0;
-        entry_time = 0;
-        last_adx_interval = -1;
-        total_reduced_volume = 0.0;
-    }
-    else
-    {
-        Print("Failed to close position: ", trade.ResultRetcode(), " - ", trade.ResultRetcodeDescription());
-    }
+    // Use the more robust CloseAllExistingPositions function
+    CloseAllExistingPositions(label);
 }
 
 //+------------------------------------------------------------------+
@@ -543,28 +555,52 @@ double CalculateRiskBasedVolume()
 //+------------------------------------------------------------------+
 void UpdatePositionInfo()
 {
-    // This function updates the current position tracking
-    // based on actual MT5 positions
+    // This function synchronizes internal tracking with actual MT5 positions
     if(PositionSelect(Symbol()))
     {
         long pos_type = PositionGetInteger(POSITION_TYPE);
         double pos_volume = PositionGetDouble(POSITION_VOLUME);
         
+        // Update current position info based on actual MT5 position
         if(pos_type == POSITION_TYPE_BUY)
         {
-            current_position_type = EA_POSITION_LONG;
+            // Only update if we don't have tracking or if there's a mismatch
+            if(current_position_type != EA_POSITION_LONG)
+            {
+                Print("Warning: Position tracking mismatch. MT5 has LONG, internal tracking was ", 
+                      EnumToString(current_position_type));
+                current_position_type = EA_POSITION_LONG;
+            }
             current_position_volume = pos_volume;
         }
         else if(pos_type == POSITION_TYPE_SELL)
         {
-            current_position_type = EA_POSITION_SHORT;
+            // Only update if we don't have tracking or if there's a mismatch
+            if(current_position_type != EA_POSITION_SHORT)
+            {
+                Print("Warning: Position tracking mismatch. MT5 has SHORT, internal tracking was ", 
+                      EnumToString(current_position_type));
+                current_position_type = EA_POSITION_SHORT;
+            }
             current_position_volume = pos_volume;
         }
     }
     else
     {
-        current_position_type = EA_POSITION_NONE;
-        current_position_volume = 0.0;
+        // No MT5 position exists
+        if(current_position_type != EA_POSITION_NONE)
+        {
+            Print("Warning: Position closed externally. Resetting internal tracking.");
+            // Reset all tracking when position is closed externally
+            current_position_type = EA_POSITION_NONE;
+            current_position_volume = 0.0;
+            entry_adx_value = 0;
+            entry_adx_interval = 0;
+            entry_lot_size = 0;
+            entry_time = 0;
+            last_adx_interval = -1;
+            total_reduced_volume = 0.0;
+        }
     }
 }
 
